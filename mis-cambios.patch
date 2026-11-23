@@ -1,3 +1,16 @@
+diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
+index 895c9c4..01be8a1 100644
+--- a/esp32/components/muse/CMakeLists.txt
++++ b/esp32/components/muse/CMakeLists.txt
+@@ -38,7 +38,7 @@ if(CONFIG_MUSE_ENABLED)
+         "muse_text.c"
+         "muse_lang.c"
+         "muse_link.c"
+-        "muse_ble.c")
++        "muse_ble.c" "muse_cartesia.c")
+     if(CONFIG_MUSE_UI_THEME)
+         list(APPEND srcs "muse_theme.c" "muse_theme_policy.c" "muse_theme_lvgl.c")
+     endif()
 diff --git a/esp32/components/muse/boards/board_m5stack_core2.c b/esp32/components/muse/boards/board_m5stack_core2.c
 index 18d5ec2..a8e466d 100644
 --- a/esp32/components/muse/boards/board_m5stack_core2.c
@@ -177,6 +190,37 @@ index 82c4746..739d291 100644
    lvgl/lvgl:
      version: "9.5.0"
      public: true
+diff --git a/esp32/components/muse/muse_ble.c b/esp32/components/muse/muse_ble.c
+index bc5cc88..340229f 100644
+--- a/esp32/components/muse/muse_ble.c
++++ b/esp32/components/muse/muse_ble.c
+@@ -28,6 +28,7 @@
+ #include "nvs.h"
+ 
+ #include "muse_chat.h"
++#include "muse_cartesia.h"
+ #include "muse_link.h"
+ #include "muse_settings.h"
+ #include "muse_state.h"
+@@ -159,6 +160,8 @@ static void run_command(char *cmd)
+         if (muse_settings_set_hatch_token(v, cmd[11] == '+') != ESP_OK) {
+             res = "error: token too long";
+         }
++    } else if (muse_cartesia_command(cmd, v, &res)) {
++        /* result set by the Cartesia TTS module */
+     } else if (!strcmp(cmd, "hatch.test")) {
+         muse_hatch_test();
+     } else if (!strcmp(cmd, "test.loopback")) {
+@@ -184,7 +187,8 @@ static void run_command(char *cmd)
+     }
+ 
+     /* Never echo secrets back. */
+-    bool secret = !strcmp(cmd, "wifi.pass") || !strncmp(cmd, "hatch.token", 11);
++    bool secret = !strcmp(cmd, "wifi.pass") || !strncmp(cmd, "hatch.token", 11) ||
++                  !strcmp(cmd, "cartesia.key");
+     snprintf(s_last, sizeof(s_last), "%s: %s", cmd, res);
+     ESP_LOGI(TAG, "cmd %s%s%s -> %s", cmd, secret ? "" : "=", secret ? "" : v, res);
+     muse_state_poke();
 diff --git a/esp32/components/muse/muse_board.h b/esp32/components/muse/muse_board.h
 index 825efea..bd8905d 100644
 --- a/esp32/components/muse/muse_board.h
@@ -192,6 +236,394 @@ index 825efea..bd8905d 100644
      /* Called every 10 ms from the input task (50 ms while the display is
       * paused, unless wait_buttons is set); returns MUSE_BTN_* edges. */
      unsigned (*poll_buttons)(void);
+diff --git a/esp32/components/muse/muse_cartesia.c b/esp32/components/muse/muse_cartesia.c
+new file mode 100644
+index 0000000..733858e
+--- /dev/null
++++ b/esp32/components/muse/muse_cartesia.c
+@@ -0,0 +1,258 @@
++/*
++ * Cartesia text-to-speech for Muse replies (community addition). See the header.
++ */
++
++#include "muse_cartesia.h"
++
++#include <stdatomic.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "cJSON.h"
++#include "esp_crt_bundle.h"
++#include "esp_heap_caps.h"
++#include "esp_http_client.h"
++#include "esp_log.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/task.h"
++#include "muse_mem.h"
++#include "nvs.h"
++
++static const char *TAG = "muse_cartesia";
++
++#define NS "cartesia"
++#define URL "https://api.cartesia.ai/tts/bytes"
++#define API_VERSION "2026-08-14"
++#define MODEL "sonic-3.6"
++#define MP3_CAP (192 * 1024)   /* 32 kbps: ~48 s of speech */
++#define TEXT_CAP 700           /* bytes of reply text spoken */
++#define KEY_MAX 96
++#define VOICE_MAX 64
++
++static char s_key[KEY_MAX];
++static char s_voice[VOICE_MAX];
++static bool s_loaded;
++
++static _Atomic int s_state = MUSE_CARTESIA_IDLE;
++static uint8_t *s_buf;
++static size_t s_len;
++static char *s_text;
++
++static void load(void)
++{
++    if (s_loaded) {
++        return;
++    }
++    s_loaded = true;
++    nvs_handle_t h;
++    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
++        return;
++    }
++    size_t n = sizeof(s_key);
++    nvs_get_str(h, "key", s_key, &n);
++    n = sizeof(s_voice);
++    nvs_get_str(h, "voice", s_voice, &n);
++    nvs_close(h);
++}
++
++static bool save(const char *name, const char *value)
++{
++    nvs_handle_t h;
++    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) {
++        return false;
++    }
++    bool ok = nvs_set_str(h, name, value) == ESP_OK && nvs_commit(h) == ESP_OK;
++    nvs_close(h);
++    return ok;
++}
++
++bool muse_cartesia_ready(void)
++{
++    load();
++    return s_key[0] && s_voice[0];
++}
++
++/* Plain speech: no markdown marks, emoji or links, cut at a sentence end if possible. */
++static void clean(const char *in, char *out, size_t cap)
++{
++    size_t o = 0;
++    for (size_t i = 0; in[i] && o + 1 < cap; i++) {
++        unsigned char c = in[i];
++        if (c >= 0xF0) {            /* 4-byte UTF-8: emoji */
++            i += 3;
++            continue;
++        }
++        if (c == '*' || c == '#' || c == '`' || c == '_' || c == '~' || c == '\r') {
++            continue;
++        }
++        if (c == '\n') {
++            c = ' ';
++        }
++        out[o++] = c;
++    }
++    out[o] = '\0';
++    if (o >= cap - 1) {             /* cut: back to a sentence end, then to a character start */
++        size_t cut = o;
++        while (cut > cap / 2 && !strchr(".!?", out[cut - 1])) {
++            cut--;
++        }
++        if (cut <= cap / 2) {
++            cut = o;
++            while (cut && (out[cut] & 0xC0) == 0x80) {
++                cut--;
++            }
++        }
++        out[cut] = '\0';
++    }
++}
++
++static esp_err_t on_http(esp_http_client_event_t *evt)
++{
++    if (evt->event_id == HTTP_EVENT_ON_DATA && esp_http_client_get_status_code(evt->client) == 200) {
++        size_t n = evt->data_len;
++        if (s_len + n > MP3_CAP) {
++            n = MP3_CAP - s_len;   /* a long reply is cut, not dropped */
++        }
++        memcpy(s_buf + s_len, evt->data, n);
++        s_len += n;
++    }
++    return ESP_OK;
++}
++
++static bool fetch(const char *text)
++{
++    cJSON *body = cJSON_CreateObject();
++    cJSON_AddStringToObject(body, "model_id", MODEL);
++    cJSON_AddStringToObject(body, "transcript", text);
++    cJSON *voice = cJSON_AddObjectToObject(body, "voice");
++    cJSON_AddStringToObject(voice, "id", s_voice);
++    cJSON_AddStringToObject(body, "language", "es");
++    cJSON *fmt = cJSON_AddObjectToObject(body, "output_format");
++    cJSON_AddStringToObject(fmt, "container", "mp3");
++    cJSON_AddNumberToObject(fmt, "sample_rate", 24000);
++    cJSON_AddNumberToObject(fmt, "bit_rate", 32000);
++    char *json = cJSON_PrintUnformatted(body);
++    cJSON_Delete(body);
++    if (!json) {
++        return false;
++    }
++
++    char auth[KEY_MAX + 8];
++    snprintf(auth, sizeof(auth), "Bearer %s", s_key);
++    esp_http_client_config_t cfg = {
++        .url = URL,
++        .method = HTTP_METHOD_POST,
++        .timeout_ms = 20000,
++        .buffer_size = 4096,
++        .buffer_size_tx = 2048,
++        .event_handler = on_http,
++        .crt_bundle_attach = esp_crt_bundle_attach,
++    };
++    esp_http_client_handle_t c = esp_http_client_init(&cfg);
++    bool ok = false;
++    if (c) {
++        esp_http_client_set_header(c, "Authorization", auth);
++        esp_http_client_set_header(c, "Cartesia-Version", API_VERSION);
++        esp_http_client_set_header(c, "Content-Type", "application/json");
++        esp_http_client_set_post_field(c, json, strlen(json));
++        s_len = 0;
++        esp_err_t err = esp_http_client_perform(c);
++        int status = esp_http_client_get_status_code(c);
++        ok = err == ESP_OK && status == 200 && s_len > 0;
++        if (!ok) {
++            ESP_LOGW(TAG, "request failed: %s, HTTP %d", esp_err_to_name(err), status);
++        }
++        esp_http_client_cleanup(c);
++    }
++    memset(auth, 0, sizeof(auth));
++    free(json);
++    return ok;
++}
++
++static void worker(void *arg)
++{
++    bool ok = fetch(s_text);
++    ESP_LOGI(TAG, "%s: %u bytes of MP3", ok ? "speech ready" : "no speech", (unsigned)s_len);
++    atomic_store(&s_state, ok ? MUSE_CARTESIA_DONE : MUSE_CARTESIA_FAIL);
++    vTaskDeleteWithCaps(NULL);
++}
++
++bool muse_cartesia_request(const char *text)
++{
++    if (!muse_cartesia_ready() || !text || !text[0]) {
++        return false;
++    }
++    int st = atomic_load(&s_state);
++    if (st == MUSE_CARTESIA_BUSY) {
++        return false;
++    }
++    if (!s_buf) {
++        s_buf = heap_caps_malloc(MP3_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++        s_text = heap_caps_malloc(TEXT_CAP + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++        if (!s_buf || !s_text) {
++            ESP_LOGW(TAG, "no memory for speech");
++            return false;
++        }
++    }
++    clean(text, s_text, TEXT_CAP + 1);
++    if (!s_text[0]) {
++        return false;
++    }
++    s_len = 0;
++    atomic_store(&s_state, MUSE_CARTESIA_BUSY);
++    if (xTaskCreateWithCaps(worker, "cartesia", 12288, NULL, 3, NULL, MUSE_BIG_CAPS) != pdPASS) {
++        atomic_store(&s_state, MUSE_CARTESIA_IDLE);
++        return false;
++    }
++    return true;
++}
++
++muse_cartesia_state_t muse_cartesia_state(void)
++{
++    return (muse_cartesia_state_t)atomic_load(&s_state);
++}
++
++const uint8_t *muse_cartesia_data(size_t *len)
++{
++    *len = s_len;
++    return s_buf;
++}
++
++void muse_cartesia_release(void)
++{
++    if (atomic_load(&s_state) != MUSE_CARTESIA_BUSY) {
++        atomic_store(&s_state, MUSE_CARTESIA_IDLE);
++    }
++}
++
++bool muse_cartesia_command(const char *name, const char *value, const char **result)
++{
++    if (strncmp(name, "cartesia.", 9)) {
++        return false;
++    }
++    load();
++    const char *what = name + 9;
++    *result = "ok";
++    if (!strcmp(what, "key") || !strcmp(what, "voice")) {
++        bool key = what[0] == 'k';
++        char *dst = key ? s_key : s_voice;
++        size_t max = key ? KEY_MAX : VOICE_MAX;
++        if (strlen(value) >= max) {
++            *result = "error: too long";
++        } else if (!save(what, value)) {
++            *result = "error: could not save";
++        } else {
++            strlcpy(dst, value, max);
++        }
++    } else if (!strcmp(what, "test")) {
++        if (!muse_cartesia_request(value[0] ? value : "Hola, soy Muse. Ya puedo hablar en español.")) {
++            *result = "error: not ready or busy";
++        } else {
++            /* Test only checks the fetch; the chat session plays replies. */
++            *result = "fetching, see the log";
++        }
++    } else {
++        *result = "error: unknown cartesia command";
++    }
++    return true;
++}
+diff --git a/esp32/components/muse/muse_cartesia.h b/esp32/components/muse/muse_cartesia.h
+new file mode 100644
+index 0000000..464bbc0
+--- /dev/null
++++ b/esp32/components/muse/muse_cartesia.h
+@@ -0,0 +1,34 @@
++/*
++ * Cartesia text-to-speech for Muse replies (community addition).
++ *
++ * The reply text is sent to https://api.cartesia.ai/tts/bytes on a worker
++ * task and comes back as one MP3 that the chat session decodes and plays.
++ * The API key and voice id live in NVS (namespace "cartesia"); set them from
++ * the serial console with ">cartesia.key=sk_car_..." and ">cartesia.voice=ID".
++ */
++
++#pragma once
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++typedef enum {
++    MUSE_CARTESIA_IDLE,
++    MUSE_CARTESIA_BUSY,   /* the worker is fetching */
++    MUSE_CARTESIA_DONE,   /* muse_cartesia_data() is valid */
++    MUSE_CARTESIA_FAIL,
++} muse_cartesia_state_t;
++
++/* True when a key and a voice are saved. */
++bool muse_cartesia_ready(void);
++
++/* Serial console: "key", "voice", "test" (speaks a sample line), returns false for other names. */
++bool muse_cartesia_command(const char *name, const char *value, const char **result);
++
++/* Starts fetching `text` (copied). False if not configured or a fetch is still running. */
++bool muse_cartesia_request(const char *text);
++muse_cartesia_state_t muse_cartesia_state(void);
++/* The finished MP3; valid until the next request or muse_cartesia_release(). */
++const uint8_t *muse_cartesia_data(size_t *len);
++void muse_cartesia_release(void);
+diff --git a/esp32/components/muse/muse_chat_session.cpp b/esp32/components/muse/muse_chat_session.cpp
+index 760555d..2b1362c 100644
+--- a/esp32/components/muse/muse_chat_session.cpp
++++ b/esp32/components/muse/muse_chat_session.cpp
+@@ -77,6 +77,7 @@ extern "C" {
+ #include "cJSON.h"
+ #include "minimp3.h"
+ #include "muse_account_api.h"
++#include "muse_cartesia.h"
+ #include "muse_link.h"
+ #include "muse_settings.h"
+ #include "muse_wifi.h"
+@@ -297,6 +298,8 @@ struct turn_t {
+     uint8_t *mp3;            /* MP3_BUF */
+     size_t mp3_len;
+     bool mp3_ended;
++    bool cart;               /* Cartesia is fetching this message's speech; cart_off of it is queued */
++    size_t cart_off;
+     mp3dec_t dec;
+     resampler_t down;
+     int kbps;
+@@ -2157,6 +2160,27 @@ static void start_tts(void)
+          * end. decode() plays it at the speaker's volume, captions following,
+          * and finishes the message once it's drained.
+          */
++        /* Cartesia speech (community addition): fetched on its own task, then
++         * decoded and played like any reply MP3; on failure decode() falls back
++         * to the silent captions below. */
++        if (muse_settings_speaker_on() && s_turn.texts && s_turn.texts[i * TEXT_MAX] &&
++            muse_cartesia_request(s_turn.texts + i * TEXT_MAX)) {
++            m.pcm_start = s_turn.pcm_out;
++            m.pcm_frames = 0;
++            s_turn.mp3_len = 0;
++            s_turn.mp3_ended = false;
++            s_turn.kbps = 0;
++            s_turn.down_rate = 0;
++            mp3dec_init(&s_turn.dec);
++            s_turn.cart = true;
++            s_turn.cart_off = 0;
++            m.tts = TTS_ACTIVE;
++            s_turn.tts_msg = i;
++            s_turn.silent = false;
++            ESP_LOGI(TAG, "speaking message %s with Cartesia (%u chars)", m.id, (unsigned)m.len);
++            show_reply_start(m);
++            return;
++        }
+         m.pcm_start = s_turn.pcm_out;
+         /* Paced to the text kept: a reply longer than CAPTION_TEXT shows what
+          * was kept at reading pace, not stretched over the whole reply's time
+@@ -2223,6 +2247,34 @@ static void decode(void)
+     if (s_turn.tts_msg < 0) {
+         return;
+     }
++    if (s_turn.cart) {
++        msg_t &cm = s_turn.msgs[s_turn.tts_msg];
++        muse_cartesia_state_t st = muse_cartesia_state();
++        if (st == MUSE_CARTESIA_BUSY) {
++            return;   /* the speech is still on its way */
++        }
++        if (st == MUSE_CARTESIA_DONE) {
++            size_t n;
++            const uint8_t *d = muse_cartesia_data(&n);
++            size_t take = n - s_turn.cart_off;
++            if (take > MP3_BUF - s_turn.mp3_len) {
++                take = MP3_BUF - s_turn.mp3_len;
++            }
++            tts_data(d + s_turn.cart_off, take);
++            s_turn.cart_off += take;
++            if (s_turn.cart_off < n) {
++                return;   /* the rest follows as the decoder drains the buffer */
++            }
++            s_turn.mp3_ended = true;
++        } else {
++            /* No speech: show the reply as silent captions instead. */
++            size_t shown = s_turn.texts ? CAPTION_LEN(s_turn.texts + s_turn.tts_msg * TEXT_MAX) : cm.len;
++            cm.pcm_frames = (uint32_t)(shown * MIC_RATE / TEXT_CHARS_PER_S);
++            s_turn.silent = true;
++        }
++        s_turn.cart = false;
++        muse_cartesia_release();
++    }
+     if (s_turn.silent) {
+         pace_silently();
+         return;
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
 index 6354a07..f2f526c 100644
 --- a/esp32/components/muse/muse_ui.c
