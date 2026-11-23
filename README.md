@@ -16,6 +16,8 @@ limitations under the License.
 
 # Muse Gadgets: M5Stack Core2 fork
 
+**English** · [Español](README.es.md)
+
 > **Community fork of [facebookincubator/muse-gadget-sdk](https://github.com/facebookincubator/muse-gadget-sdk)**
 > with extra features for the **M5Stack Core2 (v1.0)**. It is not affiliated with or endorsed by
 > Meta. Everything below the "Upstream README" line is the original README, unchanged.
