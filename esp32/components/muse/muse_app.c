@@ -29,6 +29,7 @@
 #include "muse_ble.h"
 #include "muse_chat.h"
 #include "muse_input.h"
+#include "muse_cartesia.h"
 #include "muse_settings.h"
 #include "muse_state.h"
 #include "muse_text.h"
@@ -79,6 +80,7 @@ void muse_app_run(const muse_board_t *board)
     ESP_LOGI(TAG, "board: %s", board->name);
     ESP_ERROR_CHECK(board->init());
     ESP_ERROR_CHECK(muse_settings_init());
+    muse_cartesia_init();
     muse_settings_set_listener(on_setting);
     muse_state_init();
 #if CONFIG_MUSE_AVATAR_SYNC

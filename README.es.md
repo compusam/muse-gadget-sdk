@@ -62,7 +62,7 @@ voz (no en mensajes escritos). El plan gratis de Cartesia da 20K créditos al me
 ## Estado y hoja de ruta
 
 Funciona: compilar y flashear, emparejamiento, Wi-Fi, micrófono, interfaz, chirp, barras RGB y respuestas habladas (necesitas tu propia key de Cartesia).
-Falta: menor latencia de la voz (streaming), voz para mensajes escritos, más sonidos y temas de luz. Se aceptan issues y pull requests. Los cambios también están en
+Falta: voz para mensajes escritos, más sonidos y temas de luz. Se aceptan issues y pull requests. Los cambios también están en
 [`mis-cambios.patch`](mis-cambios.patch) respecto al repositorio original.
 
 Necesitas tu propio [SDK token](https://gadgets.muse.ai/settings/sdk-tokens) y debes aceptar los

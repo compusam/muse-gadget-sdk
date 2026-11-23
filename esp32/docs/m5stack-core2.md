@@ -57,6 +57,7 @@ only: typed or `>chat=` messages stay text, like upstream).
    Serial commands: `>cartesia.key=`, `>cartesia.voice=`, `>cartesia.test=TEXT`. The key is never logged.
 4. Hold the strip and talk; the reply is spoken. Without a key the reply is shown as text as before.
 
+Audio streams: playback starts after ~1 s of speech has arrived (about 2 s after the reply text is complete) instead of waiting for the whole MP3.
 Model `sonic-3.6`, language `es` (change in `muse_cartesia.c`), MP3 24 kHz / 32 kbps, text capped
 at 700 characters. Cartesia's free plan is 20K credits per month (about 1 per character) and has no
 commercial licence. Your key lives only in the board's NVS.

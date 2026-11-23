@@ -15,10 +15,13 @@
 
 typedef enum {
     MUSE_CARTESIA_IDLE,
-    MUSE_CARTESIA_BUSY,   /* the worker is fetching */
-    MUSE_CARTESIA_DONE,   /* muse_cartesia_data() is valid */
+    MUSE_CARTESIA_BUSY,   /* the worker is fetching; muse_cartesia_data() grows as audio arrives */
+    MUSE_CARTESIA_DONE,   /* muse_cartesia_data() is complete */
     MUSE_CARTESIA_FAIL,
 } muse_cartesia_state_t;
+
+/* Loads the saved key and voice from NVS. Call once at boot from a task with an internal-RAM stack. */
+void muse_cartesia_init(void);
 
 /* True when a key and a voice are saved. */
 bool muse_cartesia_ready(void);
@@ -29,6 +32,6 @@ bool muse_cartesia_command(const char *name, const char *value, const char **res
 /* Starts fetching `text` (copied). False if not configured or a fetch is still running. */
 bool muse_cartesia_request(const char *text);
 muse_cartesia_state_t muse_cartesia_state(void);
-/* The finished MP3; valid until the next request or muse_cartesia_release(). */
+/* The MP3 received so far (all of it once DONE); valid until the next request or muse_cartesia_release(). */
 const uint8_t *muse_cartesia_data(size_t *len);
 void muse_cartesia_release(void);

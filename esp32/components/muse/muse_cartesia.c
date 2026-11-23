@@ -13,6 +13,7 @@
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "muse_mem.h"
@@ -35,7 +36,8 @@ static bool s_loaded;
 
 static _Atomic int s_state = MUSE_CARTESIA_IDLE;
 static uint8_t *s_buf;
-static size_t s_len;
+static _Atomic size_t s_len;   /* bytes of MP3 so far: written by the worker, read by the session */
+static int64_t s_t0;           /* when the request started, for the log */
 static char *s_text;
 
 static void load(void)
@@ -66,9 +68,15 @@ static bool save(const char *name, const char *value)
     return ok;
 }
 
-bool muse_cartesia_ready(void)
+void muse_cartesia_init(void)
 {
     load();
+}
+
+bool muse_cartesia_ready(void)
+{
+    /* Never reads NVS here: this runs on the chat session's task, whose stack is in PSRAM,
+     * and a flash read with its stack in PSRAM aborts (cache disabled). init() loaded it at boot. */
     return s_key[0] && s_voice[0];
 }
 
@@ -109,12 +117,16 @@ static void clean(const char *in, char *out, size_t cap)
 static esp_err_t on_http(esp_http_client_event_t *evt)
 {
     if (evt->event_id == HTTP_EVENT_ON_DATA && esp_http_client_get_status_code(evt->client) == 200) {
+        size_t len = atomic_load(&s_len);
         size_t n = evt->data_len;
-        if (s_len + n > MP3_CAP) {
-            n = MP3_CAP - s_len;   /* a long reply is cut, not dropped */
+        if (len + n > MP3_CAP) {
+            n = MP3_CAP - len;   /* a long reply is cut, not dropped */
         }
-        memcpy(s_buf + s_len, evt->data, n);
-        s_len += n;
+        if (!len) {
+            ESP_LOGI(TAG, "first audio after %d ms", (int)((esp_timer_get_time() - s_t0) / 1000));
+        }
+        memcpy(s_buf + len, evt->data, n);
+        atomic_store(&s_len, len + n);   /* the session may decode what's here while the rest arrives */
     }
     return ESP_OK;
 }
@@ -155,10 +167,9 @@ static bool fetch(const char *text)
         esp_http_client_set_header(c, "Cartesia-Version", API_VERSION);
         esp_http_client_set_header(c, "Content-Type", "application/json");
         esp_http_client_set_post_field(c, json, strlen(json));
-        s_len = 0;
         esp_err_t err = esp_http_client_perform(c);
         int status = esp_http_client_get_status_code(c);
-        ok = err == ESP_OK && status == 200 && s_len > 0;
+        ok = err == ESP_OK && status == 200 && atomic_load(&s_len) > 0;
         if (!ok) {
             ESP_LOGW(TAG, "request failed: %s, HTTP %d", esp_err_to_name(err), status);
         }
@@ -172,7 +183,8 @@ static bool fetch(const char *text)
 static void worker(void *arg)
 {
     bool ok = fetch(s_text);
-    ESP_LOGI(TAG, "%s: %u bytes of MP3", ok ? "speech ready" : "no speech", (unsigned)s_len);
+    ESP_LOGI(TAG, "%s: %u bytes of MP3 in %d ms", ok ? "speech ready" : "no speech", (unsigned)atomic_load(&s_len),
+             (int)((esp_timer_get_time() - s_t0) / 1000));
     atomic_store(&s_state, ok ? MUSE_CARTESIA_DONE : MUSE_CARTESIA_FAIL);
     vTaskDeleteWithCaps(NULL);
 }
@@ -198,7 +210,8 @@ bool muse_cartesia_request(const char *text)
     if (!s_text[0]) {
         return false;
     }
-    s_len = 0;
+    atomic_store(&s_len, 0);
+    s_t0 = esp_timer_get_time();
     atomic_store(&s_state, MUSE_CARTESIA_BUSY);
     if (xTaskCreateWithCaps(worker, "cartesia", 12288, NULL, 3, NULL, MUSE_BIG_CAPS) != pdPASS) {
         atomic_store(&s_state, MUSE_CARTESIA_IDLE);
@@ -214,7 +227,7 @@ muse_cartesia_state_t muse_cartesia_state(void)
 
 const uint8_t *muse_cartesia_data(size_t *len)
 {
-    *len = s_len;
+    *len = atomic_load(&s_len);
     return s_buf;
 }
 

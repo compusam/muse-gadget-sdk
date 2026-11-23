@@ -123,6 +123,7 @@ static const char *TAG = "muse_chat_session";
 #define IN_BYTES (MIC_RATE * 2 * 8)        /* 8 s of mic backlog while connecting */
 #define OUT_BYTES (MIC_RATE * 2 * 2)       /* 2 s of decoded reply */
 #endif
+#define CART_PREBUFFER 4096                /* Cartesia speech: ~1 s at 32 kbps before playback starts */
 #define MP3_HOLD (1441 + 4)               /* the largest MP3 frame and the next header */
 #define MP3_POLL_ROOM (SCRATCH + 8192)     /* stop reading the socket below this much MP3 room */
 static_assert(MP3_BUF > MP3_POLL_ROOM + MP3_HOLD, "reads would stall with the MP3 buffer empty");
@@ -2248,32 +2249,36 @@ static void decode(void)
         return;
     }
     if (s_turn.cart) {
+        /* Speech streams in on Cartesia's task: decode what has arrived while the rest comes. */
         msg_t &cm = s_turn.msgs[s_turn.tts_msg];
-        muse_cartesia_state_t st = muse_cartesia_state();
-        if (st == MUSE_CARTESIA_BUSY) {
-            return;   /* the speech is still on its way */
+        muse_cartesia_state_t st = muse_cartesia_state();   /* read first: the length below is then final if DONE */
+        size_t n;
+        const uint8_t *d = muse_cartesia_data(&n);
+        if (st == MUSE_CARTESIA_BUSY && !s_turn.cart_off && n < CART_PREBUFFER) {
+            return;   /* wait for about a second of speech so playback doesn't stutter */
         }
-        if (st == MUSE_CARTESIA_DONE) {
-            size_t n;
-            const uint8_t *d = muse_cartesia_data(&n);
-            size_t take = n - s_turn.cart_off;
-            if (take > MP3_BUF - s_turn.mp3_len) {
-                take = MP3_BUF - s_turn.mp3_len;
-            }
-            tts_data(d + s_turn.cart_off, take);
-            s_turn.cart_off += take;
-            if (s_turn.cart_off < n) {
-                return;   /* the rest follows as the decoder drains the buffer */
-            }
-            s_turn.mp3_ended = true;
-        } else {
+        if (st != MUSE_CARTESIA_BUSY && !n) {
             /* No speech: show the reply as silent captions instead. */
             size_t shown = s_turn.texts ? CAPTION_LEN(s_turn.texts + s_turn.tts_msg * TEXT_MAX) : cm.len;
             cm.pcm_frames = (uint32_t)(shown * MIC_RATE / TEXT_CHARS_PER_S);
             s_turn.silent = true;
+            s_turn.cart = false;
+            muse_cartesia_release();
+        } else {
+            size_t take = n - s_turn.cart_off;
+            if (take > MP3_BUF - s_turn.mp3_len) {
+                take = MP3_BUF - s_turn.mp3_len;
+            }
+            if (take) {
+                tts_data(d + s_turn.cart_off, take);
+                s_turn.cart_off += take;
+            }
+            if (st != MUSE_CARTESIA_BUSY && s_turn.cart_off >= n) {
+                s_turn.mp3_ended = true;   /* all of it (or all that arrived before an error) */
+                s_turn.cart = false;
+                muse_cartesia_release();
+            }
         }
-        s_turn.cart = false;
-        muse_cartesia_release();
     }
     if (s_turn.silent) {
         pace_silently();

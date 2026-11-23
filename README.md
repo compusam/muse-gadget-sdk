@@ -53,7 +53,7 @@ Only the Core2 **v1.0** (AXP192) is supported, not v1.1 (AXP2101).
 ## Status and roadmap
 
 Working: build/flash, pairing, Wi-Fi, mic, UI, chirp, RGB bars, spoken replies (needs your own Cartesia key).
-Not yet: lower speech latency (streaming), spoken replies for typed messages, more sounds and
+Not yet: spoken replies for typed messages, more sounds and
 light themes. Issues and pull requests are welcome. Changes are also kept as
 [`mis-cambios.patch`](mis-cambios.patch) against upstream.
 
