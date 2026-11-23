@@ -33,7 +33,7 @@ dependencies:
   espressif/led_strip:
     version: "~3.0"
     rules:
-      - if: "$CONFIG{MUSE_BOARD_ID} == \"dfrobot_unihiker_k10\""
+      - if: "$CONFIG{MUSE_BOARD_ID} in [\"dfrobot_unihiker_k10\", \"m5stack_core2\"]"
   lvgl/lvgl:
     version: "9.5.0"
     public: true

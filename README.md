@@ -14,7 +14,55 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Muse Gadgets
+# Muse Gadgets: M5Stack Core2 fork
+
+> **Community fork of [facebookincubator/muse-gadget-sdk](https://github.com/facebookincubator/muse-gadget-sdk)**
+> with extra features for the **M5Stack Core2 (v1.0)**. It is not affiliated with or endorsed by
+> Meta. Everything below the "Upstream README" line is the original README, unchanged.
+
+## What this fork adds
+
+- **Tap Muse, hear and see it:** touching Muse on the screen plays a chirp and flashes the lights.
+- **RGB side bars:** the Core2's 10 SK6812 LEDs (GPIO25) show Muse's state: idle, listening,
+  thinking, speaking, error, asleep.
+- **Green LED feedback** while you hold the talk zone.
+- **Chirp fix:** the speaker no longer gets cut off by the mic channel switch.
+- **Helper tools** in [`esp32/tools/core2`](esp32/tools/core2): enter your SDK token with hidden
+  input, and log serial output without resetting the board.
+- A full [Core2 guide](esp32/docs/m5stack-core2.md): build, flash, pairing gotchas, debugging.
+
+## Quick start
+
+```sh
+git clone --recursive https://github.com/compusam/muse-gadget-sdk
+cd muse-gadget-sdk/esp32
+. ~/esp/esp-idf-v6/export.sh                  # ESP-IDF v6.0.3
+tools/muse/board.sh build core2
+tools/muse/board.sh flash core2 /dev/ttyUSB0
+python tools/core2/set_token.py /dev/ttyUSB0  # your SDK token, input hidden
+```
+
+Then pair `MuseGadget-XXXXXX` from the Muse app (Developer mode) and **confirm by tapping the
+middle touch strip below the screen**. Details in the [Core2 guide](esp32/docs/m5stack-core2.md).
+
+Only the Core2 **v1.0** (AXP192) is supported, not v1.1 (AXP2101).
+
+## Status and roadmap
+
+Working: build/flash, pairing, Wi-Fi, mic, UI, chirp, RGB bars.
+Not yet: spoken replies (Muse answers as text; a TTS hook is the open idea), more sounds and
+light themes. Issues and pull requests are welcome. Changes are also kept as
+[`mis-cambios.patch`](mis-cambios.patch) against upstream.
+
+You need your own [SDK token](https://gadgets.muse.ai/settings/sdk-tokens) and must follow the
+[Gadget SDK Terms](https://gadgets.muse.ai/sdk-terms). Never commit your token. As upstream says,
+use at your own risk: bricked boards and brownouts are possible.
+
+---
+
+## Upstream README
+
+### Muse Gadgets
 
 <p align="center">
   <picture>

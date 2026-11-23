@@ -1758,6 +1758,11 @@ static void voice_task(void *arg)
                 s_chirp = false;
                 muse_wakeword_set_playback(true);
                 muse_audio_chirp(1);
+                /* The chirp fits the DMA queue whole, so the write returns at
+                 * once and the next mic read would tear the speaker channel
+                 * down mid-sound. Trailing silence blocks until it has played. */
+                static const int16_t tail[MUSE_AUDIO_RATE / 8] = { 0 };
+                muse_audio_write(tail, sizeof(tail) / sizeof(tail[0]));
                 muse_wakeword_set_playback(false);
                 pre_reset();
             }

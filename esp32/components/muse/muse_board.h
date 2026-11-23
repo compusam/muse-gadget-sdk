@@ -165,6 +165,10 @@ typedef struct {
      * then. NULL: always powered. */
     void (*codec_power)(bool on);
 
+    /* A single indicator LED the board drives itself (e.g. the Core2's green
+     * LED). Optional; NULL: the board has none. */
+    void (*set_led)(bool on);
+
     /* Called every 10 ms from the input task (50 ms while the display is
      * paused, unless wait_buttons is set); returns MUSE_BTN_* edges. */
     unsigned (*poll_buttons)(void);

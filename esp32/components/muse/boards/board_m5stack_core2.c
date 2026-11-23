@@ -37,6 +37,7 @@
  * battery, backlight and shutdown code below is specific to the AXP192.
  */
 #include <math.h>
+#include <string.h>
 
 #include "sdkconfig.h"
 
@@ -53,6 +54,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "led_strip.h"
 
 #include "muse_audio.h"
 #include "muse_board.h"
@@ -144,6 +146,8 @@ static int tp_zone(void)
     return x >= TP_X_THIRD && x < 2 * TP_X_THIRD ? 1 : 0;
 }
 
+static void rgb_start(void);
+
 static esp_err_t init(void)
 {
     ESP_RETURN_ON_ERROR(bsp_i2c_init(), TAG, "i2c init");
@@ -172,7 +176,115 @@ static esp_err_t init(void)
      * The touch controller may still be unpowered here; a failed read just
      * leaves the talk state clear for the first poll to set. */
     s_talk_pressed = tp_zone() == 1;
+    /* The green LED on the left edge is AXP192 GPIO1: function bits 000 make
+     * it an open-drain output (reg 0x92), and its level is reg 0x94 bit 1,
+     * where 0 pulls the pin low and lights it. Start dark. A failure is
+     * harmless: the LED just goes unused. */
+    if (axp_write_masked(0x92, 0x07, 0x00) == ESP_OK) {
+        axp_write_masked(0x94, 0x02, 0x02);
+    }
+    rgb_start();
     return ESP_OK;
+}
+
+/* The green power LED on the left edge. */
+static void green_led(bool on)
+{
+    if (s_axp) {
+        axp_write_masked(0x94, 0x02, on ? 0x00 : 0x02);
+    }
+}
+
+/*
+ * The RGB bars on the sides are SK6812s on GPIO25 (10 of them, 5 a side, in
+ * the M5GO-style base that ships with the AWS EduKit). They run off the 5 V
+ * bus, which the AXP192's EXTEN pin switches. Colours follow Muse's state
+ * and a tap on Muse flashes a rainbow; asleep, they go dark.
+ */
+#define RGB_GPIO GPIO_NUM_25
+#define RGB_COUNT 10
+#define RGB_MAX 40             /* per-channel cap: bright enough, easy on the battery */
+
+static led_strip_handle_t s_rgb;
+static volatile bool s_flash;  /* a tap on Muse: rainbow */
+
+static void hsv_px(int h, int v, uint8_t *px)
+{
+    int rem = h % 60, q = v * (60 - rem) / 60, t = v * rem / 60;
+    switch ((h / 60) % 6) {
+    case 0: px[0] = v; px[1] = t; px[2] = 0; break;
+    case 1: px[0] = q; px[1] = v; px[2] = 0; break;
+    case 2: px[0] = 0; px[1] = v; px[2] = t; break;
+    case 3: px[0] = 0; px[1] = q; px[2] = v; break;
+    case 4: px[0] = t; px[1] = 0; px[2] = v; break;
+    default: px[0] = v; px[1] = 0; px[2] = q; break;
+    }
+}
+
+static void rgb_task(void *arg)
+{
+    uint32_t tick = 0;
+    uint8_t last[RGB_COUNT][3] = { { 0xff } };   /* differs from the first frame */
+    for (;;) {
+        uint8_t px[RGB_COUNT][3] = { 0 };
+        tick++;
+        int ph = tick % 50, tri = ph < 25 ? ph : 50 - ph;   /* 0..25 triangle, 2 s */
+        int br = RGB_MAX * tri / 25;
+        if (s_flash) {
+            for (int i = 0; i < RGB_COUNT; i++) {
+                hsv_px((int)((tick * 14 + i * 36) % 360), RGB_MAX, px[i]);
+            }
+        } else if (!muse_state_asleep()) {
+            uint8_t c[3] = { 0, 0, 0 };
+            switch (muse_state_mode(NULL)) {
+            case MUSE_MODE_LISTENING: c[1] = RGB_MAX; break;                  /* green */
+            case MUSE_MODE_THINKING:  c[0] = br; c[2] = br; break;            /* purple pulse */
+            case MUSE_MODE_SPEAKING:  c[1] = br; c[2] = br; break;            /* cyan pulse */
+            case MUSE_MODE_ERROR:     c[0] = (tick / 10) % 2 ? RGB_MAX : 0; break;   /* red blink */
+            case MUSE_MODE_IDLE:      c[1] = 2 + 6 * tri / 25; c[2] = c[1] / 2; break;   /* dim teal breath */
+            default: break;
+            }
+            for (int i = 0; i < RGB_COUNT; i++) {
+                memcpy(px[i], c, 3);
+            }
+        }
+        if (memcmp(px, last, sizeof(px)) != 0) {
+            memcpy(last, px, sizeof(px));
+            for (int i = 0; i < RGB_COUNT; i++) {
+                led_strip_set_pixel(s_rgb, i, px[i][0], px[i][1], px[i][2]);
+            }
+            led_strip_refresh(s_rgb);
+        }
+        vTaskDelay(pdMS_TO_TICKS(40));
+    }
+}
+
+static void rgb_start(void)
+{
+    /* EXTEN on: the 5 V boost for the M-Bus, as M5's own libraries do. */
+    axp_write_masked(0x12, 0x40, 0x40);
+    const led_strip_config_t strip = {
+        .strip_gpio_num = RGB_GPIO, .max_leds = RGB_COUNT, .led_model = LED_MODEL_WS2812,
+        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
+    };
+    const led_strip_rmt_config_t rmt = { .clk_src = RMT_CLK_SRC_DEFAULT, .resolution_hz = 10000000 };
+    if (led_strip_new_rmt_device(&strip, &rmt, &s_rgb) != ESP_OK) {
+        ESP_LOGW(TAG, "RGB bars unavailable");
+        return;
+    }
+    led_strip_clear(s_rgb);
+    if (xTaskCreateWithCaps(rgb_task, "core2_rgb", 3072, NULL, 2, NULL, MUSE_BIG_CAPS) != pdPASS) {
+        ESP_LOGW(TAG, "RGB task failed");
+        return;
+    }
+    ESP_LOGI(TAG, "RGB bars: %d x SK6812 on GPIO%d", RGB_COUNT, (int)RGB_GPIO);
+}
+
+/* The UI's tap on Muse: a short flash on the bars, plus the green LED. */
+static void set_led(bool on)
+{
+    s_flash = on;
+    green_led(on);
 }
 
 static lv_indev_read_cb_t s_touch_read;
@@ -432,8 +544,10 @@ static unsigned poll_buttons(void)
         bool pressed = zone == 1;
         if (pressed && !s_talk_pressed) {
             out |= MUSE_BTN_TALK_PRESS;
+            green_led(true);    /* lit for as long as the zone is held */
         } else if (!pressed && s_talk_pressed) {
             out |= MUSE_BTN_TALK_RELEASE;
+            green_led(false);
         }
         s_talk_pressed = pressed;
     }
@@ -505,6 +619,7 @@ static const muse_board_t s_board = {
     .audio_init = audio_init,
     .mic_slot = 0,              /* M5Unified's slot: the ESP32 stores each pair swapped */
     .set_mic_gain = set_mic_gain,
+    .set_led = set_led,
     .poll_buttons = poll_buttons,
     .read_power = read_power,
     .power_off = power_off,

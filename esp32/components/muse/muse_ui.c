@@ -646,11 +646,32 @@ static void build_button_icons(lv_obj_t *face)
     lv_obj_align(s_aux_icon, a->align, a->x, a->y);
 }
 
+static void led_off_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (muse_board->set_led) {
+        muse_board->set_led(false);
+    }
+}
+
 static void on_canvas_clicked(lv_event_t *e)
 {
     (void)e;
     if (!s_volume_swipe.claimed) {
         muse_state_make_happy();
+        /* A tap on Muse answers with a rising chirp (only while idle, so it
+         * never lands on a recording or a reply) and a short LED flash. */
+        muse_mode_t mode = muse_state_mode(NULL);
+        bool quiet = mode == MUSE_MODE_IDLE || mode == MUSE_MODE_ERROR;
+        ESP_LOGI(TAG, "tap on Muse: mode %d, chirp %s", (int)mode, quiet ? "yes" : "skipped (busy)");
+        if (muse_board->audio_init && quiet) {
+            muse_voice_request_chirp();
+        }
+        if (muse_board->set_led) {
+            muse_board->set_led(true);
+            lv_timer_t *t = lv_timer_create(led_off_cb, 250, NULL);
+            lv_timer_set_repeat_count(t, 1);
+        }
 #if CONFIG_MUSE_AVATAR_SYNC
         s_avatar_reaction_start=(float)esp_timer_get_time()/1e6f;
 #endif
