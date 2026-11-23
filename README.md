@@ -28,6 +28,7 @@ limitations under the License.
 - **RGB side bars:** the Core2's 10 SK6812 LEDs (GPIO25) show Muse's state: idle, listening,
   thinking, speaking, error, asleep.
 - **Green LED feedback** while you hold the talk zone.
+- **Spoken replies:** Muse's answers are read aloud with Cartesia TTS (Spanish or any Sonic language).
 - **Chirp fix:** the speaker no longer gets cut off by the mic channel switch.
 - **Helper tools** in [`esp32/tools/core2`](esp32/tools/core2): enter your SDK token with hidden
   input, and log serial output without resetting the board.
@@ -51,8 +52,8 @@ Only the Core2 **v1.0** (AXP192) is supported, not v1.1 (AXP2101).
 
 ## Status and roadmap
 
-Working: build/flash, pairing, Wi-Fi, mic, UI, chirp, RGB bars.
-Not yet: spoken replies (Muse answers as text; a TTS hook is the open idea), more sounds and
+Working: build/flash, pairing, Wi-Fi, mic, UI, chirp, RGB bars, spoken replies (needs your own Cartesia key).
+Not yet: lower speech latency (streaming), spoken replies for typed messages, more sounds and
 light themes. Issues and pull requests are welcome. Changes are also kept as
 [`mis-cambios.patch`](mis-cambios.patch) against upstream.
 

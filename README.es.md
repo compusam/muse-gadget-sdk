@@ -13,6 +13,7 @@
 - **Barras RGB laterales:** los 10 LEDs SK6812 del Core2 (GPIO25) muestran el estado de Muse:
   reposo, escuchando, pensando, hablando, error y dormido.
 - **LED verde** mientras mantienes pulsada la zona para hablar.
+- **Respuestas habladas:** Muse lee sus respuestas en voz alta con Cartesia TTS (español u otro idioma de Sonic).
 - **Arreglo del chirp:** el altavoz ya no se corta por el cambio de canal del micrófono.
 - **Herramientas** en [`esp32/tools/core2`](esp32/tools/core2): introducir el SDK token con
   entrada oculta y registrar el serial sin reiniciar la placa.
@@ -36,6 +37,18 @@ no sirve para eso.
 
 Solo se soporta el Core2 **v1.0** (AXP192), no el v1.1 (AXP2101).
 
+## Voz con Cartesia
+
+Crea una API key en <https://play.cartesia.ai/keys> y elige una voz en la
+[Voice Library](https://play.cartesia.ai/voices) (filtro Spanish > Mexican; "Copy ID"). Luego, en una terminal normal:
+
+```sh
+python esp32/tools/core2/set_cartesia.py VOICE_ID /dev/ttyUSB0   # pide la key con entrada oculta
+```
+
+Mantén la franja y habla: la respuesta se oye. Sin key, se muestra como texto. Solo habla en notas de
+voz (no en mensajes escritos). El plan gratis de Cartesia da 20K créditos al mes (~1 por carácter).
+
 ## Consejos
 
 - **Abrir `/dev/ttyUSB0` reinicia la placa.** Para ver el log sin reiniciarla usa
@@ -48,9 +61,8 @@ Solo se soporta el Core2 **v1.0** (AXP192), no el v1.1 (AXP2101).
 
 ## Estado y hoja de ruta
 
-Funciona: compilar y flashear, emparejamiento, Wi-Fi, micrófono, interfaz, chirp y barras RGB.
-Falta: respuestas habladas (Muse responde como texto; una conexión a un TTS es la idea abierta),
-más sonidos y temas de luz. Se aceptan issues y pull requests. Los cambios también están en
+Funciona: compilar y flashear, emparejamiento, Wi-Fi, micrófono, interfaz, chirp, barras RGB y respuestas habladas (necesitas tu propia key de Cartesia).
+Falta: menor latencia de la voz (streaming), voz para mensajes escritos, más sonidos y temas de luz. Se aceptan issues y pull requests. Los cambios también están en
 [`mis-cambios.patch`](mis-cambios.patch) respecto al repositorio original.
 
 Necesitas tu propio [SDK token](https://gadgets.muse.ai/settings/sdk-tokens) y debes aceptar los

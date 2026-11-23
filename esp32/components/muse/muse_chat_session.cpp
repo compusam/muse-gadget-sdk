@@ -77,6 +77,7 @@ extern "C" {
 #include "cJSON.h"
 #include "minimp3.h"
 #include "muse_account_api.h"
+#include "muse_cartesia.h"
 #include "muse_link.h"
 #include "muse_settings.h"
 #include "muse_wifi.h"
@@ -297,6 +298,8 @@ struct turn_t {
     uint8_t *mp3;            /* MP3_BUF */
     size_t mp3_len;
     bool mp3_ended;
+    bool cart;               /* Cartesia is fetching this message's speech; cart_off of it is queued */
+    size_t cart_off;
     mp3dec_t dec;
     resampler_t down;
     int kbps;
@@ -2157,6 +2160,27 @@ static void start_tts(void)
          * end. decode() plays it at the speaker's volume, captions following,
          * and finishes the message once it's drained.
          */
+        /* Cartesia speech (community addition): fetched on its own task, then
+         * decoded and played like any reply MP3; on failure decode() falls back
+         * to the silent captions below. */
+        if (muse_settings_speaker_on() && s_turn.texts && s_turn.texts[i * TEXT_MAX] &&
+            muse_cartesia_request(s_turn.texts + i * TEXT_MAX)) {
+            m.pcm_start = s_turn.pcm_out;
+            m.pcm_frames = 0;
+            s_turn.mp3_len = 0;
+            s_turn.mp3_ended = false;
+            s_turn.kbps = 0;
+            s_turn.down_rate = 0;
+            mp3dec_init(&s_turn.dec);
+            s_turn.cart = true;
+            s_turn.cart_off = 0;
+            m.tts = TTS_ACTIVE;
+            s_turn.tts_msg = i;
+            s_turn.silent = false;
+            ESP_LOGI(TAG, "speaking message %s with Cartesia (%u chars)", m.id, (unsigned)m.len);
+            show_reply_start(m);
+            return;
+        }
         m.pcm_start = s_turn.pcm_out;
         /* Paced to the text kept: a reply longer than CAPTION_TEXT shows what
          * was kept at reading pace, not stretched over the whole reply's time
@@ -2222,6 +2246,34 @@ static void decode(void)
 {
     if (s_turn.tts_msg < 0) {
         return;
+    }
+    if (s_turn.cart) {
+        msg_t &cm = s_turn.msgs[s_turn.tts_msg];
+        muse_cartesia_state_t st = muse_cartesia_state();
+        if (st == MUSE_CARTESIA_BUSY) {
+            return;   /* the speech is still on its way */
+        }
+        if (st == MUSE_CARTESIA_DONE) {
+            size_t n;
+            const uint8_t *d = muse_cartesia_data(&n);
+            size_t take = n - s_turn.cart_off;
+            if (take > MP3_BUF - s_turn.mp3_len) {
+                take = MP3_BUF - s_turn.mp3_len;
+            }
+            tts_data(d + s_turn.cart_off, take);
+            s_turn.cart_off += take;
+            if (s_turn.cart_off < n) {
+                return;   /* the rest follows as the decoder drains the buffer */
+            }
+            s_turn.mp3_ended = true;
+        } else {
+            /* No speech: show the reply as silent captions instead. */
+            size_t shown = s_turn.texts ? CAPTION_LEN(s_turn.texts + s_turn.tts_msg * TEXT_MAX) : cm.len;
+            cm.pcm_frames = (uint32_t)(shown * MIC_RATE / TEXT_CHARS_PER_S);
+            s_turn.silent = true;
+        }
+        s_turn.cart = false;
+        muse_cartesia_release();
     }
     if (s_turn.silent) {
         pace_silently();

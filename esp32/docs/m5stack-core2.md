@@ -34,6 +34,7 @@ Reflashing keeps pairing and Wi-Fi (NVS is untouched).
 | Side **RGB bars** (10 x SK6812 on GPIO25, powered by the AXP192 EXTEN 5 V rail) that follow Muse's state: idle teal breathing, listening green, thinking purple pulse, speaking cyan pulse, error red blink, off when asleep | `board_m5stack_core2.c` |
 | Green power LED (AXP192 GPIO1): solid while the talk zone is held | `board_m5stack_core2.c` |
 | Optional board hook `set_led(bool)` | `muse_board.h` |
+| **Spoken replies** with [Cartesia](https://cartesia.ai) TTS (Spanish, any language Sonic supports): reply text is sent to the API, the returned MP3 plays through the speaker; falls back to text captions on any failure | `muse_cartesia.c`, `muse_chat_session.cpp` |
 | Fix: the chirp was cut off because the I2S0 channel switched to the mic before the DMA queue drained; 125 ms of trailing silence | `muse_voice.c` |
 | `led_strip` component enabled for `m5stack_core2` | `idf_component.yml` |
 
@@ -42,11 +43,27 @@ upstream checkout with `git apply mis-cambios.patch`).
 
 Tunables: `RGB_MAX` (brightness, default 40/255) and `RGB_COUNT` in `board_m5stack_core2.c`.
 
+## Spoken replies (Cartesia)
+
+Muse's replies are text in the stock SDK. This fork can speak them with Cartesia (voice notes
+only: typed or `>chat=` messages stay text, like upstream).
+
+1. Create an API key at <https://play.cartesia.ai/keys> and pick a voice id in the
+   [Voice Library](https://play.cartesia.ai/voices) (filter Spanish > Mexican for Latin American
+   Spanish; "Copy ID" in the row menu). Example: Ximena, `3597a26f-80ef-4bd5-8101-9699bc764917`.
+2. Save both on the board (key typed with hidden input, in a real terminal; needs `pyserial`):
+   `python esp32/tools/core2/set_cartesia.py VOICE_ID /dev/ttyUSB0`
+3. Check it: `printf '>cartesia.test=Hola\n' > /dev/ttyUSB0` logs `speech ready: N bytes of MP3`.
+   Serial commands: `>cartesia.key=`, `>cartesia.voice=`, `>cartesia.test=TEXT`. The key is never logged.
+4. Hold the strip and talk; the reply is spoken. Without a key the reply is shown as text as before.
+
+Model `sonic-3.6`, language `es` (change in `muse_cartesia.c`), MP3 24 kHz / 32 kbps, text capped
+at 700 characters. Cartesia's free plan is 20K credits per month (about 1 per character) and has no
+commercial licence. Your key lives only in the board's NVS.
+
 ## Known limits
 
-- **Replies are text only.** This SDK shows Muse's answers as captions paced with silence;
-  there is no text-to-speech. The speaker works (chirp, `m` test MP3), so a TTS hook could go in
-  `muse_chat_session.cpp` (reply handling, ~line 2146). PRs welcome.
+- Replies are spoken only for voice notes; text turns stay silent captions.
 - Short voice notes (< ~2 s, near silence) get no useful reply: hold the strip and speak up.
 - I2S0 is shared by the PDM mic (GPIO0/34) and the NS4168 speaker (GPIO12/0/2): one direction
   at a time.
