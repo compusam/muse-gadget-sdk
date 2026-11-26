@@ -1,5 +1,60 @@
+diff --git a/esp32/avatar/muse_pixel.c b/esp32/avatar/muse_pixel.c
+index 0dcf562..f668cef 100644
+--- a/esp32/avatar/muse_pixel.c
++++ b/esp32/avatar/muse_pixel.c
+@@ -349,7 +349,10 @@ static float eyes_update(const muse_pose_t *p, float dt)
+     default:
+         break;
+     }
+-    float k = 1.0f - expf(-dt * 14.0f);
++    /* A moved or tilted board pulls the gaze to that side (muse_imu.c). */
++    tgx += (p->look_x - tgx) * p->look_w;
++    tgy += (p->look_y - tgy) * p->look_w;
++    float k = 1.0f - expf(-dt * (14.0f + 30.0f * p->look_w));   /* snappy while following motion */
+     e->gx += (tgx - e->gx) * k;
+     e->gy += (tgy - e->gy) * k;
+ 
+@@ -984,6 +987,10 @@ void muse_pixel_render(const muse_pose_t *p)
+     if (happy > 0) {
+         hop = fabsf(sinf(t * 9.0f)) * 3.0f * happy;
+     }
++    if (p->jolt > 0 && mode != MUSE_MODE_OFF) {
++        hop += fabsf(sinf(t * 11.0f)) * 7.0f * p->jolt;   /* picked up or shaken */
++    }
++    lean += p->lean * 4.0f;
+ 
+     /* Boot: the avatar pops up from a squash, then opens their eyes. */
+     float boot = mode == MUSE_MODE_BOOT ? clampf(p->mode_t / 1.4f, 0, 1) : 1.0f;
+@@ -998,7 +1005,8 @@ void muse_pixel_render(const muse_pose_t *p)
+     j.cy = 56.5f - j.b + bob * 0.5f - hop;   /* feet stay near the ground */
+     j.fa = j.a * 0.66f;
+     j.fb = 7.4f * squash;
+-    j.fx = j.cx + lean * 0.3f;
++    /* A tilted or moved board turns the face toward that side, like turning the head. */
++    j.fx = j.cx + lean * 0.3f + p->look_x * p->look_w * 3.5f;
+     j.fy = j.cy - j.b * 0.30f + bob * 0.3f;
+     if (mode == MUSE_MODE_SPEAKING) j.fy += speech.nod * .8f;
+ 
+@@ -1148,12 +1156,16 @@ void muse_pixel_render(const muse_pose_t *p)
+     default:
+         break;
+     }
++    if (p->jolt > 0.45f && mode == MUSE_MODE_IDLE) {
++        style = EYES_WIDE;   /* startled */
++        mouth = MOUTH_O;
++    }
+     if (happy > 0.2f && mode != MUSE_MODE_ERROR) {
+         style = EYES_HAPPY;
+         mouth = MOUTH_GRIN;
+     }
+ 
+-    float gaze_x = s_eyes.gx;
++    float gaze_x = s_eyes.gx * (1.0f + p->look_w);   /* eyes reach further while following motion */
+     if (mode == MUSE_MODE_SPEAKING) gaze_x = clampf(gaze_x + speech.gaze, -1, 1);
+     draw_eye(j.fx - eye_dx, eye_y, open, style, gaze_x, s_eyes.gy);
+     draw_eye(j.fx + eye_dx, eye_y, open, style, gaze_x, s_eyes.gy);
 diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
-index 895c9c4..01be8a1 100644
+index 895c9c4..12eb193 100644
 --- a/esp32/components/muse/CMakeLists.txt
 +++ b/esp32/components/muse/CMakeLists.txt
 @@ -38,7 +38,7 @@ if(CONFIG_MUSE_ENABLED)
@@ -7,12 +62,12 @@ index 895c9c4..01be8a1 100644
          "muse_lang.c"
          "muse_link.c"
 -        "muse_ble.c")
-+        "muse_ble.c" "muse_cartesia.c")
++        "muse_ble.c" "muse_cartesia.c" "muse_imu.c")
      if(CONFIG_MUSE_UI_THEME)
          list(APPEND srcs "muse_theme.c" "muse_theme_policy.c" "muse_theme_lvgl.c")
      endif()
 diff --git a/esp32/components/muse/boards/board_m5stack_core2.c b/esp32/components/muse/boards/board_m5stack_core2.c
-index 18d5ec2..a8e466d 100644
+index 18d5ec2..a10f15c 100644
 --- a/esp32/components/muse/boards/board_m5stack_core2.c
 +++ b/esp32/components/muse/boards/board_m5stack_core2.c
 @@ -37,6 +37,7 @@
@@ -31,16 +86,26 @@ index 18d5ec2..a8e466d 100644
  
  #include "muse_audio.h"
  #include "muse_board.h"
-@@ -144,6 +146,8 @@ static int tp_zone(void)
+@@ -76,7 +78,7 @@ static const char *TAG = "board";
+ #define TP_Y_ZONE 240          /* controller rows at/above this are M5's buttons (tb_y) */
+ #define TP_X_THIRD 107         /* 320/3: BtnB is the middle third (tb_k = 65536*3/320) */
+ 
+-static i2c_master_dev_handle_t s_axp, s_tp;
++static i2c_master_dev_handle_t s_axp, s_tp, s_imu;
+ static bool s_talk_pressed;
+ static i2s_chan_handle_t s_mic_rx, s_spk_tx;
+ static int s_dir;              /* I2S0's current direction: 0 none, 1 mic, 2 speaker */
+@@ -144,6 +146,9 @@ static int tp_zone(void)
      return x >= TP_X_THIRD && x < 2 * TP_X_THIRD ? 1 : 0;
  }
  
 +static void rgb_start(void);
++static void imu_start(void);
 +
  static esp_err_t init(void)
  {
      ESP_RETURN_ON_ERROR(bsp_i2c_init(), TAG, "i2c init");
-@@ -172,9 +176,117 @@ static esp_err_t init(void)
+@@ -172,9 +177,118 @@ static esp_err_t init(void)
       * The touch controller may still be unpowered here; a failed read just
       * leaves the talk state clear for the first poll to set. */
      s_talk_pressed = tp_zone() == 1;
@@ -52,6 +117,7 @@ index 18d5ec2..a8e466d 100644
 +        axp_write_masked(0x94, 0x02, 0x02);
 +    }
 +    rgb_start();
++    imu_start();
      return ESP_OK;
  }
  
@@ -109,7 +175,7 @@ index 18d5ec2..a8e466d 100644
 +            case MUSE_MODE_THINKING:  c[0] = br; c[2] = br; break;            /* purple pulse */
 +            case MUSE_MODE_SPEAKING:  c[1] = br; c[2] = br; break;            /* cyan pulse */
 +            case MUSE_MODE_ERROR:     c[0] = (tick / 10) % 2 ? RGB_MAX : 0; break;   /* red blink */
-+            case MUSE_MODE_IDLE:      c[1] = 2 + 6 * tri / 25; c[2] = c[1] / 2; break;   /* dim teal breath */
++            /* IDLE stays dark: a constant glow drains the battery */
 +            default: break;
 +            }
 +            for (int i = 0; i < RGB_COUNT; i++) {
@@ -158,7 +224,7 @@ index 18d5ec2..a8e466d 100644
  static lv_indev_read_cb_t s_touch_read;
  static lv_point_t s_touch_point;
  
-@@ -432,8 +544,10 @@ static unsigned poll_buttons(void)
+@@ -432,8 +546,10 @@ static unsigned poll_buttons(void)
          bool pressed = zone == 1;
          if (pressed && !s_talk_pressed) {
              out |= MUSE_BTN_TALK_PRESS;
@@ -169,11 +235,84 @@ index 18d5ec2..a8e466d 100644
          }
          s_talk_pressed = pressed;
      }
-@@ -505,6 +619,7 @@ static const muse_board_t s_board = {
+@@ -485,6 +601,71 @@ static esp_err_t power_off(void)
+     return ESP_FAIL;
+ }
+ 
++/*
++ * The MPU6886 motion sensor (I2C 0x68, on the same bus as the PMU and touch). Muse reads it
++ * through muse_imu.c: tilt and slide steer the eyes, a lift or shake startles. Failure to find it
++ * only leaves the reactions off.
++ */
++#define IMU_ADDR 0x68
++#define IMU_SIGN_X (+1.0f)   /* fixes the board's axes to x right, y up the screen, z out of it */
++#define IMU_SIGN_Y (+1.0f)
++#define IMU_SIGN_Z (+1.0f)
++
++static esp_err_t imu_write(uint8_t reg, uint8_t val)
++{
++    const uint8_t out[2] = { reg, val };
++    return i2c_master_transmit(s_imu, out, sizeof(out), 100);
++}
++
++static void imu_start(void)
++{
++    const i2c_device_config_t cfg = {
++        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
++        .device_address = IMU_ADDR,
++        .scl_speed_hz = 400000,
++    };
++    if (i2c_master_bus_add_device(bsp_i2c_get_handle(), &cfg, &s_imu) != ESP_OK) {
++        s_imu = NULL;
++        return;
++    }
++    uint8_t reg = 0x75, id = 0;   /* WHO_AM_I: 0x19 */
++    if (i2c_master_transmit_receive(s_imu, &reg, 1, &id, 1, 100) != ESP_OK || id != 0x19) {
++        ESP_LOGW(TAG, "no MPU6886 (WHO_AM_I 0x%02x): no motion reactions", id);
++        i2c_master_bus_rm_device(s_imu);
++        s_imu = NULL;
++        return;
++    }
++    imu_write(0x6B, 0x80);                 /* reset */
++    vTaskDelay(pdMS_TO_TICKS(20));
++    imu_write(0x6B, 0x01);                 /* wake, PLL clock */
++    vTaskDelay(pdMS_TO_TICKS(10));
++    imu_write(0x1C, 0x08);                 /* accel +-4 g: 8192 LSB/g */
++    imu_write(0x1B, 0x08);                 /* gyro +-500 dps: 65.5 LSB/dps */
++    imu_write(0x1A, 0x02);                 /* gyro low-pass */
++    imu_write(0x1D, 0x04);                 /* accel low-pass */
++    ESP_LOGI(TAG, "MPU6886 motion sensor ready");
++}
++
++static esp_err_t imu_read(float accel_g[3], float gyro_dps[3])
++{
++    if (!s_imu) {
++        return ESP_ERR_NOT_FOUND;
++    }
++    uint8_t reg = 0x3B, b[14];
++    ESP_RETURN_ON_ERROR(i2c_master_transmit_receive(s_imu, &reg, 1, b, sizeof(b), 20), TAG, "imu read");
++    int16_t v[7];
++    for (int i = 0; i < 7; i++) {
++        v[i] = (int16_t)((b[2 * i] << 8) | b[2 * i + 1]);   /* ax ay az temp gx gy gz */
++    }
++    accel_g[0] = IMU_SIGN_X * v[0] / 8192.0f;
++    accel_g[1] = IMU_SIGN_Y * v[1] / 8192.0f;
++    accel_g[2] = IMU_SIGN_Z * v[2] / 8192.0f;
++    gyro_dps[0] = IMU_SIGN_X * v[4] / 65.5f;
++    gyro_dps[1] = IMU_SIGN_Y * v[5] / 65.5f;
++    gyro_dps[2] = IMU_SIGN_Z * v[6] / 65.5f;
++    return ESP_OK;
++}
++
+ static const muse_board_t s_board = {
+     .name = "M5Stack Core2",
+     .width = BSP_LCD_H_RES,
+@@ -505,6 +686,8 @@ static const muse_board_t s_board = {
      .audio_init = audio_init,
      .mic_slot = 0,              /* M5Unified's slot: the ESP32 stores each pair swapped */
      .set_mic_gain = set_mic_gain,
 +    .set_led = set_led,
++    .imu_read = imu_read,
      .poll_buttons = poll_buttons,
      .read_power = read_power,
      .power_off = power_off,
@@ -211,27 +350,30 @@ index 5fa6cd9..db1bcd4 100644
      muse_state_init();
  #if CONFIG_MUSE_AVATAR_SYNC
 diff --git a/esp32/components/muse/muse_ble.c b/esp32/components/muse/muse_ble.c
-index bc5cc88..340229f 100644
+index bc5cc88..0638429 100644
 --- a/esp32/components/muse/muse_ble.c
 +++ b/esp32/components/muse/muse_ble.c
-@@ -28,6 +28,7 @@
+@@ -28,6 +28,8 @@
  #include "nvs.h"
  
  #include "muse_chat.h"
 +#include "muse_cartesia.h"
++#include "muse_imu.h"
  #include "muse_link.h"
  #include "muse_settings.h"
  #include "muse_state.h"
-@@ -159,6 +160,8 @@ static void run_command(char *cmd)
+@@ -159,6 +161,10 @@ static void run_command(char *cmd)
          if (muse_settings_set_hatch_token(v, cmd[11] == '+') != ESP_OK) {
              res = "error: token too long";
          }
++    } else if (muse_imu_command(cmd, v, &res)) {
++        /* result set by the motion module */
 +    } else if (muse_cartesia_command(cmd, v, &res)) {
 +        /* result set by the Cartesia TTS module */
      } else if (!strcmp(cmd, "hatch.test")) {
          muse_hatch_test();
      } else if (!strcmp(cmd, "test.loopback")) {
-@@ -184,7 +187,8 @@ static void run_command(char *cmd)
+@@ -184,7 +190,8 @@ static void run_command(char *cmd)
      }
  
      /* Never echo secrets back. */
@@ -242,16 +384,19 @@ index bc5cc88..340229f 100644
      ESP_LOGI(TAG, "cmd %s%s%s -> %s", cmd, secret ? "" : "=", secret ? "" : v, res);
      muse_state_poke();
 diff --git a/esp32/components/muse/muse_board.h b/esp32/components/muse/muse_board.h
-index 825efea..bd8905d 100644
+index 825efea..908b418 100644
 --- a/esp32/components/muse/muse_board.h
 +++ b/esp32/components/muse/muse_board.h
-@@ -165,6 +165,10 @@ typedef struct {
+@@ -165,6 +165,13 @@ typedef struct {
       * then. NULL: always powered. */
      void (*codec_power)(bool on);
  
 +    /* A single indicator LED the board drives itself (e.g. the Core2's green
 +     * LED). Optional; NULL: the board has none. */
 +    void (*set_led)(bool on);
++    /* Optional motion sensor (muse_imu.c): acceleration in g and rotation in deg/s, x right,
++     * y up the screen, z out of it. NULL: no motion reactions. */
++    esp_err_t (*imu_read)(float accel_g[3], float gyro_dps[3]);
 +
      /* Called every 10 ms from the input task (50 ms while the display is
       * paused, unless wait_buttons is set); returns MUSE_BTN_* edges. */
@@ -672,11 +817,234 @@ index 760555d..d3d77b5 100644
      if (s_turn.silent) {
          pace_silently();
          return;
+diff --git a/esp32/components/muse/muse_imu.c b/esp32/components/muse/muse_imu.c
+new file mode 100644
+index 0000000..a388ca3
+--- /dev/null
++++ b/esp32/components/muse/muse_imu.c
+@@ -0,0 +1,158 @@
++/*
++ * Motion reactions for Muse (community addition). See the header.
++ */
++
++#include "muse_imu.h"
++
++#include <math.h>
++#include <string.h>
++
++#include "esp_log.h"
++#include "muse_board.h"
++#include "muse_state.h"
++#include "muse_voice.h"
++
++static const char *TAG = "muse_imu";
++
++#define TILT_DEAD 0.06f      /* tilt (sine of the angle) ignored below this */
++#define TILT_GAIN 4.0f       /* a ~20 degree tilt turns the eyes fully */
++#define SLIDE_GAIN 2.2f      /* sideways acceleration (g) that adds to it */
++#define LOOK_ON 0.08f        /* gaze strength that counts as "looking" */
++#define SHAKE_HIT 0.9f       /* a hard acceleration: this many g away from the baseline */
++#define SHAKE_GAP 0.06f      /* seconds between two jolts */
++#define SHAKE_WINDOW 0.7f    /* the jolts of one shake come within this long of each other */
++#define SHAKE_COUNT 3        /* reversals that make a shake */
++
++static bool s_debug;
++static float s_last, s_dbg;
++static float s_f[3];         /* accel, smoothed: the tilt */
++static float s_slow[3];      /* accel, very slow: gravity, so the rest is movement */
++static float s_slide;        /* smoothed sideways acceleration */
++static float s_lw, s_jolt;
++static float s_hit_t, s_chirp_t;
++static int s_hits;
++static float s_hard[3];   /* the last hard acceleration, away from the baseline */
++static bool s_have_hard, s_shaking;
++static bool s_have;
++
++static float clampf(float v, float lo, float hi)
++{
++    return v < lo ? lo : (v > hi ? hi : v);
++}
++
++/* Shaken: the same chirp and lights as a tap on Muse (muse_ui.c), at most every 1.5 s. */
++static void shake_reaction(float now)
++{
++    muse_state_make_happy();
++    muse_mode_t mode = muse_state_mode(NULL);
++    bool quiet = mode == MUSE_MODE_IDLE || mode == MUSE_MODE_ERROR;
++    ESP_LOGI(TAG, "shaken: mode %d, chirp %s", (int)mode, quiet && now - s_chirp_t > 1.5f ? "yes" : "skipped");
++    if (muse_board->audio_init && quiet && now - s_chirp_t > 1.5f) {
++        s_chirp_t = now;
++        muse_voice_request_chirp();
++    }
++    if (muse_board->set_led) {
++        muse_board->set_led(true);   /* the rainbow runs until the hop settles */
++    }
++}
++
++void muse_imu_apply(muse_pose_t *pose, float now)
++{
++    if (!muse_board || !muse_board->imu_read) {
++        return;
++    }
++    float a[3], g[3];
++    if (muse_board->imu_read(a, g) != ESP_OK) {
++        return;
++    }
++    float dt = s_last > 0 ? clampf(now - s_last, 0.005f, 0.2f) : 0.04f;
++    s_last = now;
++    if (!s_have) {
++        memcpy(s_f, a, sizeof(s_f));
++        memcpy(s_slow, a, sizeof(s_slow));
++        s_have = true;
++    }
++    float kf = 1.0f - expf(-dt * 25.0f), ks = 1.0f - expf(-dt * 0.8f);
++    for (int i = 0; i < 3; i++) {
++        s_f[i] += (a[i] - s_f[i]) * kf;
++        s_slow[i] += (a[i] - s_slow[i]) * ks;
++    }
++    s_slide += ((a[0] - s_slow[0]) - s_slide) * (1.0f - expf(-dt * 20.0f));
++
++    float mag = sqrtf(s_f[0] * s_f[0] + s_f[1] * s_f[1] + s_f[2] * s_f[2]);
++    float norm = mag > 0.3f ? mag : 0.3f;
++    float tx = s_f[0] / norm, ty = s_f[1] / norm;
++    tx = tx > 0 ? fmaxf(tx - TILT_DEAD, 0) : fminf(tx + TILT_DEAD, 0);
++    /* Tilt: the x axis points right, so tilting left (left edge down) reads positive; Muse looks
++     * toward the low edge, like a ball rolling downhill. A sideways slide reads negative toward
++     * the left, so it adds with its own sign. (Measured on a Core2: held left tilt gave ax +0.76.) */
++    float look_x = clampf(-tx * TILT_GAIN + s_slide * SLIDE_GAIN, -1, 1);
++    /* No vertical look from tilt: held upright is the normal pose and would stare up forever. */
++    float look_y = 0;
++    (void)ty;
++
++    /* A shake is the movement reversing, hard, several times in a row: each time the acceleration
++     * away from the baseline points the opposite way to the last hard one, that is a jolt. A
++     * continuous high reading would never count, and carrying or tilting it reverses once at most. */
++    float dyn[3] = { a[0] - s_slow[0], a[1] - s_slow[1], a[2] - s_slow[2] };
++    float dm = sqrtf(dyn[0] * dyn[0] + dyn[1] * dyn[1] + dyn[2] * dyn[2]);
++    if (now - s_hit_t > SHAKE_WINDOW) {
++        s_hits = 0;
++        s_have_hard = false;
++    }
++    if (dm > SHAKE_HIT) {
++        if (s_have_hard && dyn[0] * s_hard[0] + dyn[1] * s_hard[1] + dyn[2] * s_hard[2] < 0 &&
++            now - s_hit_t > SHAKE_GAP) {
++            s_hits++;
++            s_hit_t = now;
++        } else if (!s_have_hard) {
++            s_hit_t = now;
++        }
++        memcpy(s_hard, dyn, sizeof(s_hard));
++        s_have_hard = true;
++    }
++    s_jolt = fmaxf(0.0f, s_jolt - dt * 1.2f);   /* the hop lasts about a second after the shake */
++    if (s_hits >= SHAKE_COUNT) {
++        s_jolt = 1.0f;
++        if (!s_shaking) {
++            s_shaking = true;
++            shake_reaction(now);
++        }
++        s_hits = 0;
++        s_have_hard = false;
++    }
++    if (s_shaking && s_jolt < 0.3f) {
++        s_shaking = false;
++        if (muse_board->set_led) {
++            muse_board->set_led(false);
++        }
++    }
++
++    bool active = fabsf(look_x) > LOOK_ON || fabsf(look_y) > LOOK_ON;
++    s_lw = active ? fminf(s_lw + dt * 25.0f, 1.0f) : fmaxf(s_lw - dt * 6.0f, 0.0f);
++
++    pose->look_x = look_x;
++    pose->look_y = look_y;
++    pose->look_w = s_lw;
++    pose->lean = look_x * 0.7f * s_lw;
++    pose->jolt = s_jolt;
++    if (s_jolt > 0.6f) {
++        muse_state_poke();   /* shaking it keeps it awake */
++    }
++
++    if (s_debug && now - s_dbg > 0.25f) {
++        s_dbg = now;
++        ESP_LOGI(TAG, "a % .2f % .2f % .2f g  g % 4.0f % 4.0f % 4.0f dps -> look % .2f % .2f jolt %.2f",
++                 a[0], a[1], a[2], g[0], g[1], g[2], look_x, look_y, s_jolt);
++    }
++}
++
++bool muse_imu_command(const char *name, const char *value, const char **result)
++{
++    if (strcmp(name, "imu.debug")) {
++        return false;
++    }
++    s_debug = value[0] == '1';
++    *result = "ok";
++    return true;
++}
+diff --git a/esp32/components/muse/muse_imu.h b/esp32/components/muse/muse_imu.h
+new file mode 100644
+index 0000000..5d675c2
+--- /dev/null
++++ b/esp32/components/muse/muse_imu.h
+@@ -0,0 +1,14 @@
++/*
++ * Motion reactions for Muse (community addition): tilt or slide the board and Muse looks that
++ * way; pick it up or shake it and Muse is startled. Needs muse_board_t.imu_read.
++ */
++
++#pragma once
++
++#include "muse_pixel.h"
++
++/* Fills the pose's look_*, lean and jolt from the board's motion sensor. No-op without one. */
++void muse_imu_apply(muse_pose_t *pose, float now);
++
++/* Serial commands: ">imu.debug=1|0" logs raw readings and the resulting look. */
++bool muse_imu_command(const char *name, const char *value, const char **result);
+diff --git a/esp32/components/muse/muse_pixel.h b/esp32/components/muse/muse_pixel.h
+index 15a8d39..a900408 100644
+--- a/esp32/components/muse/muse_pixel.h
++++ b/esp32/components/muse/muse_pixel.h
+@@ -40,6 +40,11 @@ typedef struct {
+     float happy;     /* 0..1 pet reaction */
+     float working;   /* 0 or 1 in THINKING: a call's Muse is busy on work it was asked
+                       * for, nothing playing. A renderer that ignores it shows THINKING. */
++    /* Motion sensing (muse_imu.c); all 0 on a board without an IMU. */
++    float look_x, look_y;   /* -1..1 where to look (left/right, up/down) while look_w > 0 */
++    float look_w;           /* 0..1 how much that gaze replaces the idle wandering */
++    float lean;             /* -1..1 body lean toward the look */
++    float jolt;             /* 0..1 picked up or shaken: a startled hop */
+ } muse_pose_t;
+ 
+ /* Accent colour of a mode (for the surrounding UI), as 0xRRGGBB. */
+diff --git a/esp32/components/muse/muse_settings.c b/esp32/components/muse/muse_settings.c
+index d768c99..a54b7cb 100644
+--- a/esp32/components/muse/muse_settings.c
++++ b/esp32/components/muse/muse_settings.c
+@@ -56,8 +56,8 @@ static struct {
+     .volume = CONFIG_MUSE_DEFAULT_VOLUME,
+     .speaker_on = true,
+     .mic_gain = 30,
+-    .brightness = 100,
+-    .sleep_s = 120,
++    .brightness = 20,
++    .sleep_s = 40,
+     .text_size = TEXT_SIZE_UNSET,
+     .wifi_on = true,
+     .host = DEFAULT_HOST,
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
-index 6354a07..f2f526c 100644
+index 6354a07..197dcc8 100644
 --- a/esp32/components/muse/muse_ui.c
 +++ b/esp32/components/muse/muse_ui.c
-@@ -646,11 +646,32 @@ static void build_button_icons(lv_obj_t *face)
+@@ -14,6 +14,7 @@
+  * limitations under the License.
+  */
+ 
++#include "muse_imu.h"
+ #include "muse_theme_lvgl.h"
+ #include "muse_ui.h"
+ #if CONFIG_MUSE_LATEST_REPLY
+@@ -646,11 +647,33 @@ static void build_button_icons(lv_obj_t *face)
      lv_obj_align(s_aux_icon, a->align, a->x, a->y);
  }
  
@@ -691,6 +1059,7 @@ index 6354a07..f2f526c 100644
  static void on_canvas_clicked(lv_event_t *e)
  {
      (void)e;
++    muse_state_poke();   /* a touch brings the backlight back up */
      if (!s_volume_swipe.claimed) {
          muse_state_make_happy();
 +        /* A tap on Muse answers with a rising chirp (only while idle, so it
@@ -709,6 +1078,37 @@ index 6354a07..f2f526c 100644
  #if CONFIG_MUSE_AVATAR_SYNC
          s_avatar_reaction_start=(float)esp_timer_get_time()/1e6f;
  #endif
+@@ -2052,6 +2075,9 @@ bool muse_ui_dark(void)
+     return s_dark;
+ }
+ 
++#define DIM_AFTER_S 10.0f
++#define DIM_PCT 12
++
+ /* Returns true while asleep (skip rendering). */
+ static bool update_sleep(void)
+ {
+@@ -2093,6 +2119,12 @@ static bool update_sleep(void)
+                 target = s_preview_brightness;
+             }
+         }
++        /* Idle for a few seconds: dim the backlight (the biggest drain). Any
++         * touch, shake or message pokes the state and brings it back. */
++        if (s_preview_brightness < 0 && muse_state_mode(NULL) == MUSE_MODE_IDLE &&
++            muse_state_idle_secs() > DIM_AFTER_S && target > DIM_PCT) {
++            target = DIM_PCT;
++        }
+         apply_brightness(target);
+     }
+     return s_dark;
+@@ -2713,6 +2745,7 @@ static void frame_tick(lv_timer_t *timer)
+         .happy = muse_state_happiness(),
+         .working = muse_voice_call_view() == MUSE_VOICE_VIEW_WORKING ? 1.0f : 0,
+     };
++    muse_imu_apply(&pose, now);   /* tilt, slide or lift: Muse looks and startles (boards with an IMU) */
+     bool render_builtin = true;
+ #if CONFIG_MUSE_AVATAR_SYNC
+ #if CONFIG_MUSE_AVATAR_ANIMATIONS
 diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
 index b0d9713..57081cc 100644
 --- a/esp32/components/muse/muse_voice.c
