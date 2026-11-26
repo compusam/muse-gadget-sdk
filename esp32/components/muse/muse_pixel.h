@@ -40,6 +40,11 @@ typedef struct {
     float happy;     /* 0..1 pet reaction */
     float working;   /* 0 or 1 in THINKING: a call's Muse is busy on work it was asked
                       * for, nothing playing. A renderer that ignores it shows THINKING. */
+    /* Motion sensing (muse_imu.c); all 0 on a board without an IMU. */
+    float look_x, look_y;   /* -1..1 where to look (left/right, up/down) while look_w > 0 */
+    float look_w;           /* 0..1 how much that gaze replaces the idle wandering */
+    float lean;             /* -1..1 body lean toward the look */
+    float jolt;             /* 0..1 picked up or shaken: a startled hop */
 } muse_pose_t;
 
 /* Accent colour of a mode (for the surrounding UI), as 0xRRGGBB. */

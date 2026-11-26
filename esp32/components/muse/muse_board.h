@@ -168,6 +168,9 @@ typedef struct {
     /* A single indicator LED the board drives itself (e.g. the Core2's green
      * LED). Optional; NULL: the board has none. */
     void (*set_led)(bool on);
+    /* Optional motion sensor (muse_imu.c): acceleration in g and rotation in deg/s, x right,
+     * y up the screen, z out of it. NULL: no motion reactions. */
+    esp_err_t (*imu_read)(float accel_g[3], float gyro_dps[3]);
 
     /* Called every 10 ms from the input task (50 ms while the display is
      * paused, unless wait_buttons is set); returns MUSE_BTN_* edges. */

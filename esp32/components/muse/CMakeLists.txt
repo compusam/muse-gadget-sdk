@@ -38,7 +38,7 @@ if(CONFIG_MUSE_ENABLED)
         "muse_text.c"
         "muse_lang.c"
         "muse_link.c"
-        "muse_ble.c" "muse_cartesia.c")
+        "muse_ble.c" "muse_cartesia.c" "muse_imu.c")
     if(CONFIG_MUSE_UI_THEME)
         list(APPEND srcs "muse_theme.c" "muse_theme_policy.c" "muse_theme_lvgl.c")
     endif()

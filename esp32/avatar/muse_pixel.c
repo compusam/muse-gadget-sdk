@@ -349,7 +349,10 @@ static float eyes_update(const muse_pose_t *p, float dt)
     default:
         break;
     }
-    float k = 1.0f - expf(-dt * 14.0f);
+    /* A moved or tilted board pulls the gaze to that side (muse_imu.c). */
+    tgx += (p->look_x - tgx) * p->look_w;
+    tgy += (p->look_y - tgy) * p->look_w;
+    float k = 1.0f - expf(-dt * (14.0f + 30.0f * p->look_w));   /* snappy while following motion */
     e->gx += (tgx - e->gx) * k;
     e->gy += (tgy - e->gy) * k;
 
@@ -984,6 +987,10 @@ void muse_pixel_render(const muse_pose_t *p)
     if (happy > 0) {
         hop = fabsf(sinf(t * 9.0f)) * 3.0f * happy;
     }
+    if (p->jolt > 0 && mode != MUSE_MODE_OFF) {
+        hop += fabsf(sinf(t * 11.0f)) * 7.0f * p->jolt;   /* picked up or shaken */
+    }
+    lean += p->lean * 4.0f;
 
     /* Boot: the avatar pops up from a squash, then opens their eyes. */
     float boot = mode == MUSE_MODE_BOOT ? clampf(p->mode_t / 1.4f, 0, 1) : 1.0f;
@@ -998,7 +1005,8 @@ void muse_pixel_render(const muse_pose_t *p)
     j.cy = 56.5f - j.b + bob * 0.5f - hop;   /* feet stay near the ground */
     j.fa = j.a * 0.66f;
     j.fb = 7.4f * squash;
-    j.fx = j.cx + lean * 0.3f;
+    /* A tilted or moved board turns the face toward that side, like turning the head. */
+    j.fx = j.cx + lean * 0.3f + p->look_x * p->look_w * 3.5f;
     j.fy = j.cy - j.b * 0.30f + bob * 0.3f;
     if (mode == MUSE_MODE_SPEAKING) j.fy += speech.nod * .8f;
 
@@ -1148,12 +1156,16 @@ void muse_pixel_render(const muse_pose_t *p)
     default:
         break;
     }
+    if (p->jolt > 0.45f && mode == MUSE_MODE_IDLE) {
+        style = EYES_WIDE;   /* startled */
+        mouth = MOUTH_O;
+    }
     if (happy > 0.2f && mode != MUSE_MODE_ERROR) {
         style = EYES_HAPPY;
         mouth = MOUTH_GRIN;
     }
 
-    float gaze_x = s_eyes.gx;
+    float gaze_x = s_eyes.gx * (1.0f + p->look_w);   /* eyes reach further while following motion */
     if (mode == MUSE_MODE_SPEAKING) gaze_x = clampf(gaze_x + speech.gaze, -1, 1);
     draw_eye(j.fx - eye_dx, eye_y, open, style, gaze_x, s_eyes.gy);
     draw_eye(j.fx + eye_dx, eye_y, open, style, gaze_x, s_eyes.gy);

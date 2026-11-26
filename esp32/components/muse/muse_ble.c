@@ -29,6 +29,7 @@
 
 #include "muse_chat.h"
 #include "muse_cartesia.h"
+#include "muse_imu.h"
 #include "muse_link.h"
 #include "muse_settings.h"
 #include "muse_state.h"
@@ -160,6 +161,8 @@ static void run_command(char *cmd)
         if (muse_settings_set_hatch_token(v, cmd[11] == '+') != ESP_OK) {
             res = "error: token too long";
         }
+    } else if (muse_imu_command(cmd, v, &res)) {
+        /* result set by the motion module */
     } else if (muse_cartesia_command(cmd, v, &res)) {
         /* result set by the Cartesia TTS module */
     } else if (!strcmp(cmd, "hatch.test")) {

@@ -35,6 +35,8 @@ Reflashing keeps pairing and Wi-Fi (NVS is untouched).
 | Green power LED (AXP192 GPIO1): solid while the talk zone is held | `board_m5stack_core2.c` |
 | Optional board hook `set_led(bool)` | `muse_board.h` |
 | **Spoken replies** with [Cartesia](https://cartesia.ai) TTS (Spanish, any language Sonic supports): reply text is sent to the API, the returned MP3 plays through the speaker; falls back to text captions on any failure | `muse_cartesia.c`, `muse_chat_session.cpp` |
+| **Motion reactions** (MPU6886 IMU): tilt or slide it sideways and Muse looks that way; shake it up and down 3-4 times and Muse hops, chirps and flashes the rainbow bars. `>imu.debug=1` logs the sensor | `muse_imu.c`, `muse_pixel.c` |
+| **Battery saving**: backlight dims after 10 s idle, screen sleeps after 40 s (touch wakes it), default brightness 20 %, RGB bars dark at idle | `muse_ui.c`, `muse_settings.c` |
 | Fix: the chirp was cut off because the I2S0 channel switched to the mic before the DMA queue drained; 125 ms of trailing silence | `muse_voice.c` |
 | `led_strip` component enabled for `m5stack_core2` | `idf_component.yml` |
 

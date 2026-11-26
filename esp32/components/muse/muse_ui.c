@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "muse_imu.h"
 #include "muse_theme_lvgl.h"
 #include "muse_ui.h"
 #if CONFIG_MUSE_LATEST_REPLY
@@ -657,6 +658,7 @@ static void led_off_cb(lv_timer_t *t)
 static void on_canvas_clicked(lv_event_t *e)
 {
     (void)e;
+    muse_state_poke();   /* a touch brings the backlight back up */
     if (!s_volume_swipe.claimed) {
         muse_state_make_happy();
         /* A tap on Muse answers with a rising chirp (only while idle, so it
@@ -2073,6 +2075,9 @@ bool muse_ui_dark(void)
     return s_dark;
 }
 
+#define DIM_AFTER_S 10.0f
+#define DIM_PCT 12
+
 /* Returns true while asleep (skip rendering). */
 static bool update_sleep(void)
 {
@@ -2113,6 +2118,12 @@ static bool update_sleep(void)
             } else {
                 target = s_preview_brightness;
             }
+        }
+        /* Idle for a few seconds: dim the backlight (the biggest drain). Any
+         * touch, shake or message pokes the state and brings it back. */
+        if (s_preview_brightness < 0 && muse_state_mode(NULL) == MUSE_MODE_IDLE &&
+            muse_state_idle_secs() > DIM_AFTER_S && target > DIM_PCT) {
+            target = DIM_PCT;
         }
         apply_brightness(target);
     }
@@ -2734,6 +2745,7 @@ static void frame_tick(lv_timer_t *timer)
         .happy = muse_state_happiness(),
         .working = muse_voice_call_view() == MUSE_VOICE_VIEW_WORKING ? 1.0f : 0,
     };
+    muse_imu_apply(&pose, now);   /* tilt, slide or lift: Muse looks and startles (boards with an IMU) */
     bool render_builtin = true;
 #if CONFIG_MUSE_AVATAR_SYNC
 #if CONFIG_MUSE_AVATAR_ANIMATIONS

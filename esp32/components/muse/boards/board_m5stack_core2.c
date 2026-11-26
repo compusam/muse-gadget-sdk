@@ -78,7 +78,7 @@ static const char *TAG = "board";
 #define TP_Y_ZONE 240          /* controller rows at/above this are M5's buttons (tb_y) */
 #define TP_X_THIRD 107         /* 320/3: BtnB is the middle third (tb_k = 65536*3/320) */
 
-static i2c_master_dev_handle_t s_axp, s_tp;
+static i2c_master_dev_handle_t s_axp, s_tp, s_imu;
 static bool s_talk_pressed;
 static i2s_chan_handle_t s_mic_rx, s_spk_tx;
 static int s_dir;              /* I2S0's current direction: 0 none, 1 mic, 2 speaker */
@@ -147,6 +147,7 @@ static int tp_zone(void)
 }
 
 static void rgb_start(void);
+static void imu_start(void);
 
 static esp_err_t init(void)
 {
@@ -184,6 +185,7 @@ static esp_err_t init(void)
         axp_write_masked(0x94, 0x02, 0x02);
     }
     rgb_start();
+    imu_start();
     return ESP_OK;
 }
 
@@ -241,7 +243,7 @@ static void rgb_task(void *arg)
             case MUSE_MODE_THINKING:  c[0] = br; c[2] = br; break;            /* purple pulse */
             case MUSE_MODE_SPEAKING:  c[1] = br; c[2] = br; break;            /* cyan pulse */
             case MUSE_MODE_ERROR:     c[0] = (tick / 10) % 2 ? RGB_MAX : 0; break;   /* red blink */
-            case MUSE_MODE_IDLE:      c[1] = 2 + 6 * tri / 25; c[2] = c[1] / 2; break;   /* dim teal breath */
+            /* IDLE stays dark: a constant glow drains the battery */
             default: break;
             }
             for (int i = 0; i < RGB_COUNT; i++) {
@@ -599,6 +601,71 @@ static esp_err_t power_off(void)
     return ESP_FAIL;
 }
 
+/*
+ * The MPU6886 motion sensor (I2C 0x68, on the same bus as the PMU and touch). Muse reads it
+ * through muse_imu.c: tilt and slide steer the eyes, a lift or shake startles. Failure to find it
+ * only leaves the reactions off.
+ */
+#define IMU_ADDR 0x68
+#define IMU_SIGN_X (+1.0f)   /* fixes the board's axes to x right, y up the screen, z out of it */
+#define IMU_SIGN_Y (+1.0f)
+#define IMU_SIGN_Z (+1.0f)
+
+static esp_err_t imu_write(uint8_t reg, uint8_t val)
+{
+    const uint8_t out[2] = { reg, val };
+    return i2c_master_transmit(s_imu, out, sizeof(out), 100);
+}
+
+static void imu_start(void)
+{
+    const i2c_device_config_t cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = IMU_ADDR,
+        .scl_speed_hz = 400000,
+    };
+    if (i2c_master_bus_add_device(bsp_i2c_get_handle(), &cfg, &s_imu) != ESP_OK) {
+        s_imu = NULL;
+        return;
+    }
+    uint8_t reg = 0x75, id = 0;   /* WHO_AM_I: 0x19 */
+    if (i2c_master_transmit_receive(s_imu, &reg, 1, &id, 1, 100) != ESP_OK || id != 0x19) {
+        ESP_LOGW(TAG, "no MPU6886 (WHO_AM_I 0x%02x): no motion reactions", id);
+        i2c_master_bus_rm_device(s_imu);
+        s_imu = NULL;
+        return;
+    }
+    imu_write(0x6B, 0x80);                 /* reset */
+    vTaskDelay(pdMS_TO_TICKS(20));
+    imu_write(0x6B, 0x01);                 /* wake, PLL clock */
+    vTaskDelay(pdMS_TO_TICKS(10));
+    imu_write(0x1C, 0x08);                 /* accel +-4 g: 8192 LSB/g */
+    imu_write(0x1B, 0x08);                 /* gyro +-500 dps: 65.5 LSB/dps */
+    imu_write(0x1A, 0x02);                 /* gyro low-pass */
+    imu_write(0x1D, 0x04);                 /* accel low-pass */
+    ESP_LOGI(TAG, "MPU6886 motion sensor ready");
+}
+
+static esp_err_t imu_read(float accel_g[3], float gyro_dps[3])
+{
+    if (!s_imu) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    uint8_t reg = 0x3B, b[14];
+    ESP_RETURN_ON_ERROR(i2c_master_transmit_receive(s_imu, &reg, 1, b, sizeof(b), 20), TAG, "imu read");
+    int16_t v[7];
+    for (int i = 0; i < 7; i++) {
+        v[i] = (int16_t)((b[2 * i] << 8) | b[2 * i + 1]);   /* ax ay az temp gx gy gz */
+    }
+    accel_g[0] = IMU_SIGN_X * v[0] / 8192.0f;
+    accel_g[1] = IMU_SIGN_Y * v[1] / 8192.0f;
+    accel_g[2] = IMU_SIGN_Z * v[2] / 8192.0f;
+    gyro_dps[0] = IMU_SIGN_X * v[4] / 65.5f;
+    gyro_dps[1] = IMU_SIGN_Y * v[5] / 65.5f;
+    gyro_dps[2] = IMU_SIGN_Z * v[6] / 65.5f;
+    return ESP_OK;
+}
+
 static const muse_board_t s_board = {
     .name = "M5Stack Core2",
     .width = BSP_LCD_H_RES,
@@ -620,6 +687,7 @@ static const muse_board_t s_board = {
     .mic_slot = 0,              /* M5Unified's slot: the ESP32 stores each pair swapped */
     .set_mic_gain = set_mic_gain,
     .set_led = set_led,
+    .imu_read = imu_read,
     .poll_buttons = poll_buttons,
     .read_power = read_power,
     .power_off = power_off,
